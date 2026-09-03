@@ -1,0 +1,16 @@
+{
+  "stories": [
+    {
+      "id": "1788467935098-9aq400ih",
+      "authorId": "1486389084204040253",
+      "authorName": "itzehoerisback",
+      "mediaUrl": "https://cdn.jsdelivr.net/gh/arnaupq2/DiscordStorySystemServertest@main/stories-media/1788467923558-1c50fg.mp4",
+      "mediaType": "video",
+      "visibility": "everyone",
+      "allowList": [],
+      "createdAt": 1788467935098,
+      "expiresAt": 1788554335098
+    }
+  ],
+  "userSettings": {}
+}
