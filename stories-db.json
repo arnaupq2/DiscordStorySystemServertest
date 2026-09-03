@@ -9,7 +9,8 @@
       "visibility": "everyone",
       "allowList": [],
       "createdAt": 1788467298374,
-      "expiresAt": 1788553698374
+      "expiresAt": 1788553698374,
+      "note": "{\"text\":\"hi idk\",\"color\":\"#ffffff\",\"x\":50,\"y\":85}"
     }
   ],
   "userSettings": {}
