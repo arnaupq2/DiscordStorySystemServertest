@@ -9,7 +9,8 @@
       "visibility": "everyone",
       "allowList": [],
       "createdAt": 1788467143355,
-      "expiresAt": 1788553543355
+      "expiresAt": 1788553543355,
+      "note": "{\"text\":\"idk aha\",\"color\":\"#ffffff\",\"x\":50,\"y\":85}"
     }
   ],
   "userSettings": {}
