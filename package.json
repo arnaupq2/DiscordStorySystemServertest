@@ -1,0 +1,16 @@
+{
+  "name": "discord-stories-backend",
+  "version": "1.0.0",
+  "description": "Backend minimo para el plugin de Historias de Vencord",
+  "main": "server.js",
+  "type": "commonjs",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "dependencies": {
+    "cors": "^2.8.5",
+    "express": "^4.22.2",
+    "lowdb": "^1.0.0",
+    "uuid": "^9.0.1"
+  }
+}
