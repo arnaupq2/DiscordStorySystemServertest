@@ -28,6 +28,17 @@ permissions:
 jobs:
   handle:
     runs-on: ubuntu-latest
+    # Sin esto, CADA uno de los ~170 comentarios de una subida trocedada
+    # dispara un job completo con checkout de git, aunque el 99% de ellos
+    # no vayan a hacer nada más que comprobar el prefijo y salir. Con
+    # muchos comentarios seguidos eso satura la cola de Actions del repo
+    # y hace que cosas más importantes (como guardar la historia después
+    # de subir el archivo) tengan que esperar turno. Filtrando aquí, a
+    # nivel de job, esas ejecuciones ni siquiera llegan a arrancar un
+    # runner — GitHub las marca como "skipped" al instante.
+    if: >
+      github.event_name == 'issues' ||
+      startsWith(github.event.comment.body, 'SEAL:')
     steps:
       - uses: actions/checkout@v4
         with:
