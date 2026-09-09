@@ -1,0 +1,239 @@
+name: Stories backend
+
+# Este workflow es el ÚNICO sitio con permiso real para escribir
+# archivos en el repo (stories-db.json y las fotos/vídeos de
+# stories-media/). El token de GitHub que se reparte entre los amigos
+# en el plugin de Vencord SOLO puede abrir issues y comentar — nunca
+# puede disparar directamente lo que hace este workflow con más
+# permisos de los que ese token tiene.
+#
+# Se dispara con dos tipos de evento:
+#  - "issues: opened"       -> mutaciones pequeñas de la base de datos
+#                              (crear/borrar historia, nota, ajustes)
+#  - "issue_comment: created" -> trozos de un archivo subido a pedazos
+#                              (solo actúa de verdad en el comentario
+#                              de sellado "SEAL:N"; el resto los ignora
+#                              casi al instante)
+
+on:
+  issues:
+    types: [opened]
+  issue_comment:
+    types: [created]
+
+permissions:
+  contents: write
+  issues: write
+
+jobs:
+  handle:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+
+      - name: Procesar evento
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require("fs");
+            const { execSync } = require("child_process");
+
+            function sh(cmd) {
+              execSync(cmd, { stdio: "inherit" });
+            }
+
+            const owner = context.repo.owner;
+            const repo = context.repo.repo;
+
+            async function comment(issueNumber, body) {
+              await github.rest.issues.createComment({ owner, repo, issue_number: issueNumber, body });
+            }
+            async function close(issueNumber) {
+              await github.rest.issues.update({ owner, repo, issue_number: issueNumber, state: "closed" });
+            }
+
+            function gitConfig() {
+              sh('git config user.name "stories-bot"');
+              sh('git config user.email "stories-bot@users.noreply.github.com"');
+            }
+
+            // Reintenta toda la operación (leer -> aplicar -> commit -> push)
+            // por si dos amigos escriben casi a la vez y hay conflicto de
+            // git al hacer push.
+            async function withRetry(branch, fn) {
+              let lastErr;
+              for (let attempt = 0; attempt < 6; attempt++) {
+                try {
+                  sh("git fetch origin");
+                  sh(`git reset --hard origin/${branch}`);
+                  await fn();
+                  return true;
+                } catch (e) {
+                  lastErr = e;
+                  await new Promise((r) => setTimeout(r, 500 + attempt * 500));
+                }
+              }
+              console.error(lastErr);
+              return false;
+            }
+
+            // ------------------------------------------------------------
+            // Caso 1: se ha abierto un issue nuevo -> mutación de la BD
+            // ------------------------------------------------------------
+            if (context.eventName === "issues") {
+              const title = context.payload.issue.title || "";
+              const issueNumber = context.issue.number;
+
+              if (!title.startsWith("[stories-mutation]")) return; // los de subida no hacen nada al abrirse
+
+              let payload;
+              try {
+                payload = JSON.parse(context.payload.issue.body || "{}");
+              } catch (e) {
+                await comment(issueNumber, "ERROR: el issue no traía JSON válido");
+                await close(issueNumber);
+                return;
+              }
+
+              const { action, data } = payload;
+              const dbPath = "stories-db.json";
+
+              const ok = await withRetry("main", () => {
+                let db = { stories: [], userSettings: {} };
+                if (fs.existsSync(dbPath)) {
+                  db = JSON.parse(fs.readFileSync(dbPath, "utf8"));
+                  db.stories ??= [];
+                  db.userSettings ??= {};
+                }
+
+                const now = Date.now();
+                db.stories = db.stories.filter((s) => s.expiresAt > now);
+
+                if (action === "postStory") db.stories.push(data.story);
+                else if (action === "deleteStory") db.stories = db.stories.filter((s) => s.id !== data.id);
+                else if (action === "setNote") {
+                  const s = db.stories.find((s) => s.id === data.id);
+                  if (s) s.note = data.note;
+                } else if (action === "putUserSettings") db.userSettings[data.userId] = data.settings;
+                else throw new Error(`acción desconocida: ${action}`);
+
+                fs.writeFileSync(dbPath, JSON.stringify(db, null, 2));
+                gitConfig();
+                sh(`git add ${dbPath}`);
+                sh(`git commit -m "stories: ${action}"`);
+                sh("git push");
+              });
+
+              if (!ok) {
+                await comment(issueNumber, "ERROR: no se pudo guardar el cambio tras varios intentos");
+                return;
+              }
+
+              await comment(issueNumber, "DONE:{}");
+              await close(issueNumber);
+              return;
+            }
+
+            // ------------------------------------------------------------
+            // Caso 2: comentario nuevo -> puede ser un trozo de subida
+            // ------------------------------------------------------------
+            if (context.eventName === "issue_comment") {
+              const title = context.payload.issue.title || "";
+              const body = context.payload.comment.body || "";
+              const issueNumber = context.issue.number;
+
+              if (!title.startsWith("[stories-chunk-upload]")) return;
+              if (!body.startsWith("SEAL:")) return; // solo actuamos cuando llega el sellado
+
+              const declaredTotal = parseInt(body.slice(5), 10);
+
+              let meta;
+              try {
+                meta = JSON.parse(context.payload.issue.body);
+              } catch (e) {
+                await comment(issueNumber, "ERROR: metadata de la subida inválida");
+                return;
+              }
+
+              // Recolecta TODOS los comentarios del issue (paginado)
+              let comments = [];
+              let page = 1;
+              while (true) {
+                const res = await github.rest.issues.listComments({ owner, repo, issue_number: issueNumber, per_page: 100, page });
+                comments = comments.concat(res.data);
+                if (res.data.length < 100) break;
+                page++;
+              }
+
+              const chunks = {};
+              for (const c of comments) {
+                const m = /^SEQ:(\d+)\n([\s\S]*)$/.exec(c.body || "");
+                if (m) chunks[parseInt(m[1], 10)] = m[2];
+              }
+
+              let b64 = "";
+              for (let i = 0; i < declaredTotal; i++) {
+                if (chunks[i] === undefined) {
+                  await comment(issueNumber, `ERROR: faltan trozos (falta el ${i}, declarados ${declaredTotal})`);
+                  return;
+                }
+                b64 += chunks[i];
+              }
+
+              const buffer = Buffer.from(b64, "base64");
+              const filePath = `stories-media/${meta.filename}`;
+              const branch = meta.branch || "main";
+
+              const ok = await withRetry(branch, () => {
+                fs.mkdirSync("stories-media", { recursive: true });
+                fs.writeFileSync(filePath, buffer);
+                gitConfig();
+                sh(`git add ${JSON.stringify(filePath)}`);
+                sh(`git commit -m "stories: subir ${meta.filename}"`);
+                sh("git push");
+              });
+
+              if (!ok) {
+                await comment(issueNumber, "ERROR: no se pudo subir el archivo tras varios intentos");
+                return;
+              }
+
+              const url = `https://cdn.jsdelivr.net/gh/${owner}/${repo}@${branch}/${filePath}`;
+              try {
+                await fetch(`https://purge.jsdelivr.net/gh/${owner}/${repo}@${branch}/${filePath}`);
+              } catch (e) {
+                // si la purga falla no pasa nada, el visor reintenta solo
+              }
+
+              await comment(issueNumber, `DONE:${JSON.stringify({ url })}`);
+              await close(issueNumber);
+              return;
+            }
+
+      - name: Limpieza de issues de subida abandonados
+        if: always()
+        uses: actions/github-script@v7
+        with:
+          script: |
+            // Si alguien empieza una subida y se corta a media (se cierra
+            // Discord, se cae la conexión...) el issue se queda abierto con
+            // trozos sueltos para siempre. Cierra los que lleven más de 2
+            // horas abiertos, para no acumular basura en el repo.
+            const owner = context.repo.owner;
+            const repo = context.repo.repo;
+            const twoHoursAgo = Date.now() - 2 * 60 * 60 * 1000;
+
+            const res = await github.rest.issues.listForRepo({ owner, repo, state: "open", per_page: 50 });
+            for (const issue of res.data) {
+              const isStoriesIssue =
+                issue.title.startsWith("[stories-chunk-upload]") || issue.title.startsWith("[stories-mutation]");
+              if (!isStoriesIssue) continue;
+              if (new Date(issue.created_at).getTime() > twoHoursAgo) continue;
+              await github.rest.issues.createComment({
+                owner, repo, issue_number: issue.number,
+                body: "ERROR: subida abandonada, se cierra automáticamente tras 2 horas",
+              });
+              await github.rest.issues.update({ owner, repo, issue_number: issue.number, state: "closed" });
+            }
